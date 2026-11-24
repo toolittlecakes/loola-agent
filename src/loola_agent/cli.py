@@ -1,15 +1,16 @@
 """Command-line shell around the SDK: env config, rendering to stderr, JSONL transcript, exit code."""
-import argparse, asyncio, json, logging, os, sys
+import argparse, asyncio, json, logging, os, sys, uuid
 from collections.abc import Sequence
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from .agent import Agent, AssistantMessage, Event, RunFinished, ToolResult, ToolStarted
+from .agent import SYSTEM_PROMPT, Agent, AssistantMessage, Event, RunFinished, ToolResult, ToolStarted
 from .llm import LLMError, OpenAICompatibleLLM
 from .bash import Bash
 from .catalog import load_catalog
 from .gh_proxy import Gh, GhUnavailable, gh_tools
+from .skills import load_skills, skills_prompt
 from .tools import Tool, Toolbox
 
 RUNS_DIR = Path.home() / ".loola-agent" / "runs"
@@ -44,10 +45,14 @@ async def toolbox(bash: Bash, catalog: Path | None, mode: str, backend: str) -> 
     return Toolbox([bash, *tools]) if mode == "direct" else Toolbox([bash], deferred=tools, deferred_hint=hint)
 
 
-async def run(task: str, transcript: Path, catalog: Path | None, mode: str, backend: str) -> RunFinished:
-    async with OpenAICompatibleLLM(os.environ["LLM_BASE_URL"], os.environ["LLM_API_KEY"],
-                                   os.environ["LLM_MODEL"]) as llm, Bash() as bash:
-        agent = Agent(llm, await toolbox(bash, catalog, mode, backend))
+async def run(task: str, transcript: Path, catalog: Path | None, mode: str, backend: str,
+              system_prompt: str) -> RunFinished:
+    session_header = os.environ.get("LLM_SESSION_HEADER")
+    async with OpenAICompatibleLLM(os.environ["LLM_BASE_URL"], os.environ["LLM_API_KEY"], os.environ["LLM_MODEL"],
+                                   max_tokens=int(os.environ.get("LLM_MAX_TOKENS", 8192)),
+                                   headers={session_header: str(uuid.uuid4())} if session_header else None
+                                   ) as llm, Bash() as bash:
+        agent = Agent(llm, await toolbox(bash, catalog, mode, backend), system_prompt)
         turn = 0
         with transcript.open("a") as f:
             async for event in agent.send(task):
@@ -68,14 +73,20 @@ def main() -> int:
                         help="deferred: found via tool_search; direct: all declared in every request")
     parser.add_argument("--catalog-backend", choices=["dummy", "gh"], default="dummy",
                         help="dummy: canned results; gh: read-only GitHub tools run through your `gh` CLI")
+    parser.add_argument("--skills", type=Path, help="directory of skills (<name>/SKILL.md)")
+    parser.add_argument("--skills-mode", choices=["lazy", "eager"], default="lazy",
+                        help="lazy: only the catalog in the system prompt; eager: every SKILL.md body inline")
     args = parser.parse_args()
     logging.basicConfig(level=logging.WARNING, format="⚠️  %(message)s")
+    system_prompt = SYSTEM_PROMPT
+    if args.skills:
+        system_prompt += "\n\n" + skills_prompt(load_skills(args.skills), eager=args.skills_mode == "eager")
     transcript = args.transcript or RUNS_DIR / f"{datetime.now():%Y%m%d-%H%M%S}.jsonl"
     transcript.parent.mkdir(parents=True, exist_ok=True)
     print(f"📝 Transcript: {transcript}", file=sys.stderr)
     try:
         result = asyncio.run(run(" ".join(args.task), transcript, args.catalog, args.catalog_mode,
-                                 args.catalog_backend))
+                                 args.catalog_backend, system_prompt))
     except (LLMError, GhUnavailable) as e:
         print(f"❌ {e}", file=sys.stderr)
         return 1

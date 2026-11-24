@@ -1,4 +1,6 @@
 """OpenAI-compatible adapter against a scripted httpx transport."""
+import json
+
 import httpx
 import pytest
 
@@ -60,3 +62,18 @@ async def test_error_body_with_200_fails_fast():
     llm, _ = llm_with({"error": {"message": "upstream overloaded"}})
     with pytest.raises(LLMError, match="Unexpected LLM response"):
         await llm.complete([], [])
+
+
+async def test_sends_reasoning_model_compatible_payload_and_custom_headers():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json=OK)
+
+    llm = OpenAICompatibleLLM("http://llm/v1", "sk", "m", max_tokens=123, headers={"x-session": "s1"},
+                              transport=httpx.MockTransport(handler))
+    await llm.complete([], [])
+    body = json.loads(requests[0].content)
+    assert body["max_completion_tokens"] == 123 and "max_tokens" not in body and "temperature" not in body
+    assert requests[0].headers["x-session"] == "s1" and requests[0].headers["user-agent"].startswith("loola-agent/")

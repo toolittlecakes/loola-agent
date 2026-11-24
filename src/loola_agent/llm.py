@@ -37,13 +37,14 @@ class LLM(Protocol):
 
 
 class OpenAICompatibleLLM:
-    def __init__(self, base_url: str, api_key: str, model: str, *, temperature: float = 0.1, max_tokens: int = 4096,
-                 retries: int = 3, retry_backoff: float = 2.0, transport: httpx.AsyncBaseTransport | None = None):
-        self.model, self.temperature, self.max_tokens = model, temperature, max_tokens
+    def __init__(self, base_url: str, api_key: str, model: str, *, max_tokens: int = 8192,
+                 temperature: float | None = None, headers: dict[str, str] | None = None, retries: int = 3,
+                 retry_backoff: float = 2.0, transport: httpx.AsyncBaseTransport | None = None):
+        self.model, self.max_tokens, self.temperature = model, max_tokens, temperature
         self.retries, self.retry_backoff = retries, retry_backoff
-        self._client = httpx.AsyncClient(base_url=base_url.rstrip("/") + "/", transport=transport,
-                                         headers={"Authorization": f"Bearer {api_key}"},
-                                         timeout=httpx.Timeout(600, connect=10))
+        self._client = httpx.AsyncClient(
+            base_url=base_url.rstrip("/") + "/", transport=transport, timeout=httpx.Timeout(600, connect=10),
+            headers={"Authorization": f"Bearer {api_key}", "User-Agent": "loola-agent/0.1.0", **(headers or {})})
 
     async def __aenter__(self) -> Self:
         return self
@@ -52,8 +53,11 @@ class OpenAICompatibleLLM:
         await self._client.aclose()
 
     async def complete(self, messages: list[dict], tools: list[dict]) -> Completion:
+        # max_completion_tokens: reasoning models reject max_tokens; vLLM and other servers accept both.
         payload = {"model": self.model, "messages": messages, "tools": tools, "tool_choice": "auto",
-                   "temperature": self.temperature, "max_tokens": self.max_tokens}
+                   "max_completion_tokens": self.max_tokens}
+        if self.temperature is not None:  # many reasoning models accept only their default temperature
+            payload["temperature"] = self.temperature
         response = await self._post_with_retry(payload)
         if response.is_error:
             raise LLMError(f"HTTP {response.status_code}: {response.text[:2000]}")

@@ -10,8 +10,9 @@ from .agent import (SYSTEM_PROMPT, Agent, AssistantMessage, Event, RunFinished, 
 from .bash import Bash
 from .catalog import DummyTool, load_catalog
 from .llm import LLM, Completion, LLMError, OpenAICompatibleLLM, Usage
+from .skills import Skill, load_skills, skills_prompt
 from .tools import Tool, Toolbox
 
 __all__ = ["SYSTEM_PROMPT", "Agent", "AssistantMessage", "Bash", "Completion", "DummyTool", "Event", "LLM",
-           "LLMError", "OpenAICompatibleLLM", "RunFinished", "Tool", "ToolResult", "ToolStarted", "Toolbox", "Usage",
-           "UserMessage", "build_context", "load_catalog"]
+           "LLMError", "OpenAICompatibleLLM", "RunFinished", "Skill", "Tool", "ToolResult", "ToolStarted", "Toolbox", "Usage",
+           "UserMessage", "build_context", "load_catalog", "load_skills", "skills_prompt"]
