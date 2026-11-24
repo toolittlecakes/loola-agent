@@ -1,0 +1,1 @@
+ground truth: ['#3831', '#3832', '#3834', '#3836']; hot files: [('CHANGELOG.md', 10), ('httpx/_config.py', 7), ('httpx/_utils.py', 6), ('httpx/_models.py', 5), ('httpx/_transports/default.py', 5), ('httpx/_client.py', 4)]
