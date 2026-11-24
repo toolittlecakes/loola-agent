@@ -1,11 +1,11 @@
 """Minimal coding agent loop — one tool: bash."""
-import json, sys, subprocess
+import json, os, sys, subprocess
 import requests
 
 
-LLM_BASE_URL = "http://ip:port/v1"
-LLM_API_KEY = "..."
-LLM_MODEL = "..."
+LLM_BASE_URL = os.environ["LLM_BASE_URL"]
+LLM_API_KEY = os.environ["LLM_API_KEY"]
+LLM_MODEL = os.environ["LLM_MODEL"]
 LLM_HEADERS = {"Content-Type": "application/json", "Authorization": f"Bearer {LLM_API_KEY}"}
 MAX_TURNS = 1000
 
