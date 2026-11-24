@@ -90,3 +90,14 @@ async def test_background_jobs_are_killed_on_exit(tmp_path):
 async def test_invalid_utf8_output_keeps_exit_code_and_side_effects(bash, tmp_path):
     output = await run(bash, f"echo created > {tmp_path}/marker; printf '\\377\\376'; exit 3")
     assert output.startswith("Exit code: 3") and (tmp_path / "marker").exists()
+
+
+async def test_cancelled_command_kills_its_process_group(bash, tmp_path):
+    marker = tmp_path / "after"
+    task = asyncio.create_task(run(bash, f"(sleep 0.5; touch {marker}) & sleep 30"))
+    await asyncio.sleep(0.2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0.8)
+    assert not marker.exists()

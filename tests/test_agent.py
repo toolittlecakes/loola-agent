@@ -1,6 +1,9 @@
 """Agent loop behavior against a scripted fake LLM."""
-import json
+import asyncio, json
 
+import pytest
+
+from loola_agent.agent import INTERRUPTED, unanswered_tool_calls
 from loola_agent import (Agent, AssistantMessage, Completion, RunFinished, ToolResult, ToolStarted, Toolbox, Usage,
                          UserMessage, build_context)
 
@@ -93,3 +96,36 @@ def test_context_is_a_projection_of_events():
               RunFinished("done", "x", 1, Usage())]
     assert build_context("sys", events) == [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"},
                                            {"role": "assistant", "content": "x"}]
+
+
+class Hang:
+    name, description = "hang", "Never finishes."
+    parameters = {"type": "object", "properties": {}}
+
+    async def run(self, args):
+        await asyncio.Event().wait()
+
+
+async def test_cancelled_tool_call_is_closed_as_interrupted_on_next_send():
+    hang = {"id": "h", "type": "function", "function": {"name": "hang", "arguments": "{}"}}
+    llm = FakeLLM(reply(None, [hang, call("a", "x")], "tool_calls"), reply("ok"))
+    agent = Agent(llm, Toolbox([Echo(), Hang()]))
+    started = asyncio.Event()
+
+    async def consume():
+        async for event in agent.send("start"):
+            if isinstance(event, ToolStarted):
+                started.set()
+
+    task = asyncio.create_task(consume())
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    _, events = await run(llm, "continue", agent)
+    context = llm.calls[1]
+    assert [m["role"] for m in context] == ["system", "user", "assistant", "tool", "tool", "user"]
+    assert [m["tool_call_id"] for m in context[3:5]] == ["h", "a"]
+    assert all(m["content"] == INTERRUPTED for m in context[3:5])
+    assert unanswered_tool_calls(agent.events) == []

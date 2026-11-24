@@ -19,6 +19,9 @@ Workflow:
 
 Be concise. Explain what you're doing before each command."""
 
+INTERRUPTED = ("Error: this tool call was interrupted before it finished; it may have had partial side effects. "
+               "Check the current state and re-run it if it is still needed.")
+
 
 @dataclass(frozen=True)
 class UserMessage:
@@ -70,6 +73,15 @@ def build_context(system_prompt: str, events: list[Event]) -> list[dict]:
     return messages
 
 
+def unanswered_tool_calls(events: list[Event]) -> list[dict]:
+    """Tool calls of the last assistant message that have no result, e.g. after a cancelled run."""
+    for i in range(len(events) - 1, -1, -1):
+        if isinstance(events[i], AssistantMessage):
+            answered = {e.tool_call_id for e in events[i + 1:] if isinstance(e, ToolResult)}
+            return [c for c in events[i].message.get("tool_calls") or [] if c["id"] not in answered]
+    return []
+
+
 class Agent:
     """One conversation. `send` runs the loop for a user message and streams events;
     the caller (CLI, TUI, web) decides how to render and persist them."""
@@ -79,6 +91,10 @@ class Agent:
         self.events: list[Event] = []
 
     async def send(self, content: str) -> AsyncIterator[Event]:
+        # Close calls left open by a cancelled run: the protocol requires a result for every call, and the
+        # model must know the command may have partially run. Re-running or dropping them silently would lie.
+        for call in unanswered_tool_calls(self.events):
+            yield self._append(ToolResult(call["id"], call["function"]["name"], INTERRUPTED))
         yield self._append(UserMessage(content))
         usage = Usage()
         for turn in range(1, self.max_turns + 1):
