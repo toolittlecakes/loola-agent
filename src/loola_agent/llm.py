@@ -33,7 +33,10 @@ class LLMError(RuntimeError):
 
 
 class LLM(Protocol):
-    async def complete(self, messages: list[dict], tools: list[dict]) -> Completion: ...
+    max_tokens: int  # completion limit of a regular reply
+
+    async def complete(self, messages: list[dict], tools: list[dict], *,
+                       max_tokens: int | None = None) -> Completion: ...
 
 
 class OpenAICompatibleLLM:
@@ -52,10 +55,11 @@ class OpenAICompatibleLLM:
     async def __aexit__(self, *exc: object) -> None:
         await self._client.aclose()
 
-    async def complete(self, messages: list[dict], tools: list[dict]) -> Completion:
+    async def complete(self, messages: list[dict], tools: list[dict], *,
+                       max_tokens: int | None = None) -> Completion:
         # max_completion_tokens: reasoning models reject max_tokens; vLLM and other servers accept both.
         payload = {"model": self.model, "messages": messages, "tools": tools, "tool_choice": "auto",
-                   "max_completion_tokens": self.max_tokens}
+                   "max_completion_tokens": max_tokens or self.max_tokens}
         if self.temperature is not None:  # many reasoning models accept only their default temperature
             payload["temperature"] = self.temperature
         response = await self._post_with_retry(payload)

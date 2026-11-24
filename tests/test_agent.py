@@ -3,7 +3,7 @@ import asyncio, json
 
 import pytest
 
-from loola_agent.agent import INTERRUPTED, unanswered_tool_calls
+from loola_agent.events import INTERRUPTED, unanswered_tool_calls
 from loola_agent import (Agent, AssistantMessage, Completion, RunFinished, ToolResult, ToolStarted, Toolbox, Usage,
                          UserMessage, build_context)
 

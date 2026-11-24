@@ -5,7 +5,9 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from .agent import SYSTEM_PROMPT, Agent, AssistantMessage, Event, RunFinished, ToolResult, ToolStarted
+from .agent import SYSTEM_PROMPT, Agent
+from .compaction import CompactionError, CompactionPolicy
+from .events import AssistantMessage, Compaction, Event, RunFinished, ToolResult, ToolStarted
 from .llm import LLMError, OpenAICompatibleLLM
 from .bash import Bash
 from .catalog import load_catalog
@@ -26,6 +28,9 @@ def render(event: Event, turn: int) -> None:
             print(f"🔧 Tool: {name}({arguments})", file=sys.stderr)
         case ToolResult(_, _, content):
             print(f"   → {content[:500]}{'...' if len(content) > 500 else ''}", file=sys.stderr)
+        case Compaction(_, _, before, after, u):
+            print(f"\n🗜️  Compacted context: ≤{before} → ≤{after} tokens (summary cost: prompt={u.prompt} "
+                  f"cached={u.cached} completion={u.completion})", file=sys.stderr)
         case RunFinished(status, _, turns, u):
             cached = "n/a" if u.cached is None else u.cached
             print(f"\n{'✅' if status == 'done' else '❌'} {status} after {turns} turns | "
@@ -52,7 +57,10 @@ async def run(task: str, transcript: Path, catalog: Path | None, mode: str, back
                                    max_tokens=int(os.environ.get("LLM_MAX_TOKENS", 8192)),
                                    headers={session_header: str(uuid.uuid4())} if session_header else None
                                    ) as llm, Bash() as bash:
-        agent = Agent(llm, await toolbox(bash, catalog, mode, backend), system_prompt)
+        window = os.environ.get("LLM_CONTEXT_WINDOW")
+        compact_at = os.environ.get("LLM_COMPACT_AT")
+        policy = CompactionPolicy(int(window), int(compact_at) if compact_at else None) if window else None
+        agent = Agent(llm, await toolbox(bash, catalog, mode, backend), system_prompt, compaction=policy)
         turn = 0
         with transcript.open("a") as f:
             async for event in agent.send(task):
@@ -87,7 +95,7 @@ def main() -> int:
     try:
         result = asyncio.run(run(" ".join(args.task), transcript, args.catalog, args.catalog_mode,
                                  args.catalog_backend, system_prompt))
-    except (LLMError, GhUnavailable) as e:
+    except (LLMError, GhUnavailable, CompactionError) as e:
         print(f"❌ {e}", file=sys.stderr)
         return 1
     if result.answer:
