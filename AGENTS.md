@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Instructions for coding agents working on this repo. The development session that produced it is in [docs/session-log.md](docs/session-log.md).
+Instructions for coding agents working on this repo. The development session that produced it: conversation digest in [docs/session-log.md](docs/session-log.md), full logs of the main session and all sub-agents in [docs/sessions/](docs/sessions/README.md).
 
 ## What this is
 
