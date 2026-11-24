@@ -102,3 +102,10 @@ async def test_agent_discovers_and_calls_a_deferred_tool_with_a_stable_tool_list
     assert llm.tools[0] == llm.tools[1] == llm.tools[2]  # declared tools never change -> prefix cache stays valid
     assert '"issue_read"' in llm.contexts[1][-1]["content"]  # the schema arrived as a tool result
     assert json.loads(llm.contexts[2][-1]["content"])["arguments"]["issue_number"] == 7
+
+
+async def test_search_returns_at_most_five_tools_and_has_no_limit_knob():
+    tools, hint = load_catalog(CATALOG)
+    toolbox = Toolbox([Direct()], deferred=tools, deferred_hint=hint)
+    assert len(json.loads(await toolbox.call("tool_search", '{"query": "repository"}'))) == 5
+    assert "'limit' was unexpected" in await toolbox.call("tool_search", '{"query": "repository", "limit": -1}')

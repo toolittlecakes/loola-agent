@@ -129,3 +129,43 @@ async def test_cancelled_tool_call_is_closed_as_interrupted_on_next_send():
     assert [m["tool_call_id"] for m in context[3:5]] == ["h", "a"]
     assert all(m["content"] == INTERRUPTED for m in context[3:5])
     assert unanswered_tool_calls(agent.events) == []
+
+
+async def test_tool_calls_in_a_truncated_reply_are_not_executed():
+    executed = []
+
+    class Spy(Echo):
+        async def run(self, args):
+            executed.append(args)
+            return "ran"
+
+    llm = FakeLLM(reply("partial", [call("a", "x")], "length"), reply("ok"))
+    agent = Agent(llm, Toolbox([Spy()]))
+    _, events = await run(llm, agent=agent)
+    assert executed == [] and events[-1].status == "truncated"
+    _, events = await run(llm, "continue", agent)  # history stays valid: the call got a result
+    assert [m["role"] for m in llm.calls[1]] == ["system", "user", "assistant", "tool", "user"]
+    assert llm.calls[1][3]["content"].startswith("Error: not executed")
+
+
+async def test_a_second_concurrent_send_is_rejected():
+    hang = {"id": "h", "type": "function", "function": {"name": "hang", "arguments": "{}"}}
+    agent = Agent(FakeLLM(reply(None, [hang], "tool_calls")), Toolbox([Echo(), Hang()]))
+    first = agent.send("one")
+    async for event in first:
+        if isinstance(event, ToolStarted):
+            break
+    with pytest.raises(RuntimeError, match="already running"):
+        await anext(agent.send("two"))
+    await first.aclose()
+    assert not agent._sending
+
+
+async def test_a_send_cancelled_before_the_reply_leaves_no_two_user_turns_in_a_row():
+    llm = FakeLLM(reply("ok"))
+    agent = Agent(llm, Toolbox([Echo()]))
+    first = agent.send("one")
+    await anext(first)  # UserMessage recorded, then abandoned
+    await first.aclose()
+    await run(llm, "two", agent)
+    assert llm.calls[0][1:] == [{"role": "user", "content": "one\n\ntwo"}]

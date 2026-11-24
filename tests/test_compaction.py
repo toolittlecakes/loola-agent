@@ -4,7 +4,7 @@ import json
 import pytest
 
 from loola_agent import (Agent, AssistantMessage, Compaction, CompactionError, CompactionPolicy, Completion,
-                         RunFinished, Toolbox, Usage, UserMessage, build_context)
+                         SummaryDiscarded, Toolbox, Usage, UserMessage, build_context)
 from loola_agent.compaction import SUMMARY_INSTRUCTION, context_bound
 from loola_agent.events import SUMMARY_HEADER
 
@@ -37,7 +37,7 @@ class SimulatedLLM:
     async def complete(self, messages, tools, *, max_tokens=None):
         prompt = self.tokens([messages, tools])
         assert prompt + (max_tokens or self.max_tokens) <= self.window, f"overflow: {prompt} prompt tokens"
-        is_summary = messages[-1] == {"role": "user", "content": SUMMARY_INSTRUCTION}
+        is_summary = messages[-1]["role"] == "user" and messages[-1]["content"].endswith(SUMMARY_INSTRUCTION)
         self.requests.append({"messages": messages, "tools": tools, "summary": is_summary, "prompt": prompt})
         if is_summary:
             message, finish = self.summary.message, self.summary.finish_reason
@@ -93,7 +93,7 @@ async def test_context_after_compaction_is_user_messages_with_summary_then_recen
     compaction = next(e for e in events if isinstance(e, Compaction))
     context = build_context(agent.system_prompt, agent.events[:agent.events.index(compaction) + 1])
     assert [m["role"] for m in context[:3]] == ["system", "user", "assistant"]
-    assert context[1]["content"] == "the original task" + SUMMARY_HEADER + "SUMMARY " + "s" * 300
+    assert context[1]["content"] == "the original task\n\n" + SUMMARY_HEADER + "SUMMARY " + "s" * 300
     assert context[2] is agent.events[compaction.cut].message
     assert compaction.tokens_after < compaction.tokens_before
 
@@ -111,32 +111,66 @@ async def test_a_turn_too_large_to_keep_fails_loudly():
         await run(agent)
 
 
-async def test_truncated_summary_fails_loudly():
+async def test_truncated_summary_fails_loudly_when_the_context_does_not_fit_and_is_recorded():
     truncated = Completion({"role": "assistant", "content": "SUMMARY partial"}, "length", Usage(0, 1000))
-    llm = SimulatedLLM(window=20_000, turns=10, summary=truncated)
-    agent = Agent(llm, Toolbox([Big()]), compaction=CompactionPolicy(20_000, 8_000, 3_000, 1_000))
-    with pytest.raises(CompactionError, match="complete summary"):
+    llm = SimulatedLLM(window=20_000, turns=40, summary=truncated)
+    agent = Agent(llm, Toolbox([Big()]), compaction=CompactionPolicy(20_000, None, 3_000, 1_000))
+    seen = []
+    with pytest.raises(CompactionError, match="no complete summary"):
+        async for event in agent.send("long task"):
+            seen.append(event)
+    assert isinstance(seen[-1], SummaryDiscarded)  # the paid request reaches the transcript before the error
+
+
+def test_bound_is_the_last_measured_prompt_plus_bytes_of_everything_after_it():
+    reply = {"role": "assistant", "content": "x"}
+    events = [UserMessage("task"), AssistantMessage(reply, "stop", Usage(1_000, 50)), UserMessage("more")]
+    added = [reply, {"role": "user", "content": "more"}]
+    assert context_bound(events) == 1_000 + sum(len(json.dumps(m).encode()) + 16 for m in added)
+    assert context_bound([UserMessage("task")]) is None  # the first request is measured by the server
+
+
+class OneShotLLM:
+    max_tokens = 500
+
+    def __init__(self, prompt):
+        self.prompt = prompt
+
+    async def complete(self, messages, tools, *, max_tokens=None):
+        return Completion({"role": "assistant", "content": "done"}, "stop", Usage(self.prompt, 1))
+
+
+async def test_a_request_the_server_measured_over_the_window_fails_loudly():
+    agent = Agent(OneShotLLM(prompt=19_600), Toolbox([Big()]), compaction=CompactionPolicy(20_000))
+    with pytest.raises(CompactionError, match="exceeds the 20000-token window"):
         await run(agent)
 
 
-def test_window_too_small_for_the_reserve_fails_at_construction():
-    with pytest.raises(ValueError, match="too small"):
-        Agent(SimulatedLLM(window=2_000, turns=0), Toolbox([Big()]), compaction=CompactionPolicy(2_000))
+async def test_baseline_without_compaction_fails_when_the_window_is_exceeded():
+    llm = SimulatedLLM(window=20_000, turns=40)
+    agent = Agent(llm, Toolbox([Big()]), compaction=CompactionPolicy(20_000, enabled=False))
+    with pytest.raises(CompactionError, match="compaction is disabled"):
+        await run(agent)
+    assert not any(r["summary"] for r in llm.requests)
 
 
-def test_bound_uses_exact_server_counts_plus_bytes_of_unmeasured_messages():
-    reply = {"role": "assistant", "content": "x"}
-    events = [UserMessage("task"), AssistantMessage(reply, "stop", Usage(1_000, 50)), UserMessage("more")]
-    message_bytes = len(json.dumps({"role": "user", "content": "more"}).encode())
-    assert context_bound("sys", events, []) == 1_000 + 50 + message_bytes + 16
+async def test_a_summary_that_does_not_shrink_the_context_is_discarded_but_paid_for():
+    verbose = Completion({"role": "assistant", "content": "SUMMARY " + "s" * 20_000}, "stop", Usage(0, 0))
+    llm = SimulatedLLM(window=40_000, turns=6, summary=verbose)
+    agent = Agent(llm, Toolbox([Big()]), compaction=CompactionPolicy(40_000, 3_000, 0, 1_000))
+    events = await run(agent)
+    discarded = [e for e in events if isinstance(e, SummaryDiscarded)]
+    assert discarded and not any(isinstance(e, Compaction) for e in events)
+    assert events[-1].status == "done"
+    assert events[-1].usage.prompt == sum(r["prompt"] for r in llm.requests)  # discarded summaries counted
 
 
 async def test_tool_call_instead_of_summary_fails_loudly():
     call = {"id": "x", "type": "function", "function": {"name": "big", "arguments": "{}"}}
     not_summary = Completion({"role": "assistant", "content": None, "tool_calls": [call]}, "tool_calls", Usage(0, 0))
-    llm = SimulatedLLM(window=20_000, turns=10, summary=not_summary)
-    agent = Agent(llm, Toolbox([Big()]), compaction=CompactionPolicy(20_000, 8_000, 3_000, 1_000))
-    with pytest.raises(CompactionError, match="complete summary"):
+    llm = SimulatedLLM(window=20_000, turns=40, summary=not_summary)
+    agent = Agent(llm, Toolbox([Big()]), compaction=CompactionPolicy(20_000, None, 3_000, 1_000))
+    with pytest.raises(CompactionError, match="no complete summary"):
         await run(agent)
 
 

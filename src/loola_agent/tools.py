@@ -32,10 +32,13 @@ class Toolbox:
             raise ValueError("Duplicate tool names")
         self._validators = {name: _validator(tool.parameters) for name, tool in self._tools.items()}
         self._has_deferred = bool(deferred)
+        # Snapshot: the declared tools are the start of the cached prompt prefix and must not change in a session.
+        self._schemas = json.loads(json.dumps([
+            {"type": "function", "function": {"name": t.name, "description": t.description, "parameters": t.parameters}}
+            for t in self._declared]))
 
     def schemas(self) -> list[dict]:
-        return [{"type": "function", "function": {"name": t.name, "description": t.description,
-                                                  "parameters": t.parameters}} for t in self._declared]
+        return self._schemas
 
     async def call(self, name: str, raw_arguments: str) -> str:
         try:
@@ -64,23 +67,25 @@ def _validator(schema: dict) -> Draft202012Validator:
     return Draft202012Validator({"additionalProperties": False, **schema})
 
 
+SEARCH_RESULTS = 5
+
+
 class ToolSearch:
     name = "tool_search"
     parameters = {"type": "object",
-                  "properties": {"query": {"type": "string", "description": "Keywords describing the action you need."},
-                                 "limit": {"type": "integer", "description": "Maximum number of tools (default 5)."}},
+                  "properties": {"query": {"type": "string", "description": "Keywords describing the action you need."}},
                   "required": ["query"]}
 
     def __init__(self, tools: Sequence[Tool], hint: str):
         self.description = ("Search the catalog of additional tools that are not listed here. Returns matching "
-                            "tools with their parameter schemas; run them with tool_call. " + hint).strip()
+                            "tools (top 5) with their parameter schemas; run them with tool_call. " + hint).strip()
         self._tools = tools
         self._index = BM25([_tokens(f"{t.name} {t.description} {' '.join(t.parameters.get('properties', {}))}")
                             for t in tools])
 
     async def run(self, args: dict) -> str:
         scores = self._index.scores(_tokens(args["query"]))
-        ranked = sorted(((s, i) for i, s in enumerate(scores) if s > 0), key=lambda pair: -pair[0])[:args.get("limit", 5)]
+        ranked = sorted(((s, i) for i, s in enumerate(scores) if s > 0), key=lambda pair: -pair[0])[:SEARCH_RESULTS]
         if not ranked:
             return "No tools match this query. Try other keywords."
         return json.dumps([{"name": self._tools[i].name, "description": self._tools[i].description,

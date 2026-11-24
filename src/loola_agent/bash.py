@@ -35,7 +35,7 @@ class Bash:
         env = {k: v for k, v in os.environ.items() if not k.startswith("LLM_")}
         with tempfile.TemporaryFile() as out:
             proc = await asyncio.create_subprocess_shell(
-                args["command"], stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, env=env,
+                args["command"], executable="/bin/bash", stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, env=env,
                 start_new_session=True)
             self._process_groups.add(proc.pid)
             try:

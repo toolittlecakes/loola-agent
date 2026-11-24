@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .agent import SYSTEM_PROMPT, Agent
 from .compaction import CompactionError, CompactionPolicy
-from .events import AssistantMessage, Compaction, Event, RunFinished, ToolResult, ToolStarted
+from .events import AssistantMessage, Compaction, Event, RunFinished, SummaryDiscarded, ToolResult, ToolStarted
 from .llm import LLMError, OpenAICompatibleLLM
 from .bash import Bash
 from .catalog import load_catalog
@@ -31,6 +31,9 @@ def render(event: Event, turn: int) -> None:
         case Compaction(_, _, before, after, u):
             print(f"\n🗜️  Compacted context: ≤{before} → ≤{after} tokens (summary cost: prompt={u.prompt} "
                   f"cached={u.cached} completion={u.completion})", file=sys.stderr)
+        case SummaryDiscarded(reason, u):
+            print(f"\n⚠️  Summary discarded: {reason} (cost: prompt={u.prompt} completion={u.completion})",
+                  file=sys.stderr)
         case RunFinished(status, _, turns, u):
             cached = "n/a" if u.cached is None else u.cached
             print(f"\n{'✅' if status == 'done' else '❌'} {status} after {turns} turns | "
@@ -51,7 +54,7 @@ async def toolbox(bash: Bash, catalog: Path | None, mode: str, backend: str) -> 
 
 
 async def run(task: str, transcript: Path, catalog: Path | None, mode: str, backend: str,
-              system_prompt: str) -> RunFinished:
+              system_prompt: str, compact: bool) -> RunFinished:
     session_header = os.environ.get("LLM_SESSION_HEADER")
     async with OpenAICompatibleLLM(os.environ["LLM_BASE_URL"], os.environ["LLM_API_KEY"], os.environ["LLM_MODEL"],
                                    max_tokens=int(os.environ.get("LLM_MAX_TOKENS", 8192)),
@@ -59,7 +62,8 @@ async def run(task: str, transcript: Path, catalog: Path | None, mode: str, back
                                    ) as llm, Bash() as bash:
         window = os.environ.get("LLM_CONTEXT_WINDOW")
         compact_at = os.environ.get("LLM_COMPACT_AT")
-        policy = CompactionPolicy(int(window), int(compact_at) if compact_at else None) if window else None
+        policy = CompactionPolicy(int(window), int(compact_at) if compact_at else None, enabled=compact) \
+            if window else None
         agent = Agent(llm, await toolbox(bash, catalog, mode, backend), system_prompt, compaction=policy)
         turn = 0
         with transcript.open("a") as f:
@@ -84,6 +88,8 @@ def main() -> int:
     parser.add_argument("--skills", type=Path, help="directory of skills (<name>/SKILL.md)")
     parser.add_argument("--skills-mode", choices=["lazy", "eager"], default="lazy",
                         help="lazy: only the catalog in the system prompt; eager: every SKILL.md body inline")
+    parser.add_argument("--no-compaction", action="store_true",
+                        help="enforce LLM_CONTEXT_WINDOW without compacting: fail when it is exceeded (baseline)")
     args = parser.parse_args()
     logging.basicConfig(level=logging.WARNING, format="⚠️  %(message)s")
     system_prompt = SYSTEM_PROMPT
@@ -94,7 +100,7 @@ def main() -> int:
     print(f"📝 Transcript: {transcript}", file=sys.stderr)
     try:
         result = asyncio.run(run(" ".join(args.task), transcript, args.catalog, args.catalog_mode,
-                                 args.catalog_backend, system_prompt))
+                                 args.catalog_backend, system_prompt, not args.no_compaction))
     except (LLMError, GhUnavailable, CompactionError) as e:
         print(f"❌ {e}", file=sys.stderr)
         return 1

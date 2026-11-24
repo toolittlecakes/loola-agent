@@ -115,8 +115,16 @@ async def test_gh_gets_exact_argv_and_no_stdin(tmp_path):
     assert await gh.run(["api", "a b", "--jq", "."]) == "api|a b|--jq|.|"
 
 
-async def test_gh_timeout_is_reported(tmp_path):
-    assert await fake_gh(tmp_path, "sleep 5").run([]) == "Error: gh timed out after 1s"
+async def test_gh_timeout_is_an_infrastructure_failure(tmp_path):
+    with pytest.raises(GhUnavailable, match="timed out"):
+        await fake_gh(tmp_path, "sleep 5").run([])
+
+
+@pytest.mark.parametrize("stderr", ["error connecting to api.github.com", "gh: Bad credentials (HTTP 401)",
+                                    "gh: Server Error (HTTP 502)", "gh: API rate limit exceeded (HTTP 403)"])
+async def test_infrastructure_failures_raise_instead_of_reaching_the_model(tmp_path, stderr):
+    with pytest.raises(GhUnavailable, match="gh failed"):
+        await fake_gh(tmp_path, f"echo '{stderr}' >&2; exit 1").run(["api", "x"])
 
 
 async def test_huge_output_is_truncated_with_a_marker(tmp_path):

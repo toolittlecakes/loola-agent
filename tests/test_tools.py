@@ -101,3 +101,14 @@ async def test_cancelled_command_kills_its_process_group(bash, tmp_path):
         await task
     await asyncio.sleep(0.8)
     assert not marker.exists()
+
+
+async def test_commands_run_in_bash(bash):
+    assert (await run(bash, "set -o pipefail; false | true; echo $?")).endswith("1\n")
+
+
+def test_declared_tools_are_a_snapshot(bash):
+    toolbox = Toolbox([bash])
+    before = toolbox.schemas()
+    bash.description = "changed at runtime"
+    assert toolbox.schemas() == before and "changed" not in json.dumps(toolbox.schemas())

@@ -5,7 +5,7 @@ Each proxied tool turns its (already schema-validated) arguments into one `gh ap
 The arguments a mapping supports are its Python parameters; anything else the schema allows is reported
 to the model as not implemented instead of being silently ignored. Other catalog tools answer with an error.
 gh authenticates itself: the token never passes through this process."""
-import asyncio, inspect, json, subprocess
+import asyncio, inspect, json, re, subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from urllib.parse import quote, urlencode
@@ -210,8 +210,9 @@ class GhUnavailable(Exception):
 
 @dataclass(frozen=True)
 class Gh:
-    """Runs `gh` without stdin, with a timeout and bounded output. gh failures (404, rate limit, bad query)
-    come back as text for the model; only a missing or logged-out gh is fatal, checked once by `check`."""
+    """Runs `gh` without stdin, with a timeout and bounded output. Errors the model can act on (a 4xx about its
+    request: wrong repo, number, query) come back as text; infrastructure failures (no HTTP status: network, TLS;
+    401; rate limits; 5xx; timeouts) raise GhUnavailable, which ends the run at the CLI boundary."""
     executable: str = "gh"
     timeout: float = 30
     max_output: int = 20_000
@@ -229,10 +230,13 @@ class Gh:
         try:
             code, out, err = await self._exec(argv)
         except TimeoutError:
-            return f"Error: gh timed out after {self.timeout:g}s"
-        if code != 0:
-            return truncate(f"Error: gh exited with code {code}: {err.strip()}\n{out}".rstrip(), self.max_output)
-        return truncate(out, self.max_output)
+            raise GhUnavailable(f"gh timed out after {self.timeout:g}s") from None
+        if code == 0:
+            return truncate(out, self.max_output)
+        status = re.search(r"\(HTTP (\d{3})\)", err)
+        if status is None or int(status[1]) in (401, 429) or int(status[1]) >= 500 or "rate limit" in err.lower():
+            raise GhUnavailable(f"gh failed (exit {code}): {err.strip()[:500]}")
+        return truncate(f"Error: gh exited with code {code}: {err.strip()}\n{out}".rstrip(), self.max_output)
 
     async def _exec(self, argv: Argv) -> tuple[int, str, str]:
         proc = await asyncio.create_subprocess_exec(self.executable, *argv, stdin=subprocess.DEVNULL,

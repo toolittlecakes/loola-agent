@@ -6,7 +6,8 @@ from .llm import Usage
 
 INTERRUPTED = ("Error: this tool call was interrupted before it finished; it may have had partial side effects. "
                "Check the current state and re-run it if it is still needed.")
-SUMMARY_HEADER = "\n\n[Earlier work in this conversation was compacted. Summary of it:]\n"
+NOT_EXECUTED = "Error: not executed: your reply was cut off by the token limit. Issue the call again if needed."
+SUMMARY_HEADER = "[Earlier work in this conversation was compacted. Summary of it:]\n"
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,12 @@ class Compaction:
 
 
 @dataclass(frozen=True)
+class SummaryDiscarded:
+    reason: str
+    usage: Usage  # a paid summary request whose result was not applied
+
+
+@dataclass(frozen=True)
 class RunFinished:
     status: Literal["done", "truncated", "empty_reply", "max_turns"]
     answer: str
@@ -52,7 +59,7 @@ class RunFinished:
     usage: Usage  # of this run only, summary requests included
 
 
-Event = UserMessage | AssistantMessage | ToolStarted | ToolResult | Compaction | RunFinished
+Event = UserMessage | AssistantMessage | ToolStarted | ToolResult | Compaction | SummaryDiscarded | RunFinished
 
 
 def to_message(event: Event) -> dict | None:
@@ -67,19 +74,30 @@ def to_message(event: Event) -> dict | None:
 
 
 def build_context(system_prompt: str, events: list[Event]) -> list[dict]:
-    """System prompt, then either all events, or after a compaction: the user's own messages verbatim plus
-    the latest summary in one user message (strict chat templates reject two user turns in a row),
-    followed by the events kept verbatim. The latest summary already covers earlier ones."""
+    """System prompt, then either all events, or after a compaction: the user's own messages verbatim plus the
+    latest summary (it already covers earlier ones), followed by the events kept verbatim. Adjacent user messages
+    are merged into one: strict chat templates reject two user turns in a row (e.g. after a cancelled send)."""
     messages: list[dict] = [{"role": "system", "content": system_prompt}]
     start = 0
     compactions = [e for e in events if isinstance(e, Compaction)]
     if compactions:
         last = compactions[-1]
-        users = [e.content for e in events[:last.cut] if isinstance(e, UserMessage)]
-        messages.append({"role": "user", "content": "\n\n".join(users) + SUMMARY_HEADER + last.summary})
+        for event in events[:last.cut]:
+            if isinstance(event, UserMessage):
+                _add(messages, {"role": "user", "content": event.content})
+        _add(messages, {"role": "user", "content": SUMMARY_HEADER + last.summary})
         start = last.cut
-    messages += [m for e in events[start:] if (m := to_message(e)) is not None]
+    for event in events[start:]:
+        if (message := to_message(event)) is not None:
+            _add(messages, message)
     return messages
+
+
+def _add(messages: list[dict], message: dict) -> None:
+    if message["role"] == "user" and messages[-1]["role"] == "user":
+        messages[-1] = {"role": "user", "content": f"{messages[-1]['content']}\n\n{message['content']}"}
+    else:
+        messages.append(message)
 
 
 def unanswered_tool_calls(events: list[Event]) -> list[dict]:
