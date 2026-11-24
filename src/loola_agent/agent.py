@@ -41,6 +41,8 @@ class Agent:
         self._sending = True
         try:
             async for event in self._run(content):
+                if isinstance(event, RunFinished):  # the run is over: a follow-up send may start right away
+                    self._sending = False
                 yield event
         finally:
             self._sending = False
@@ -61,7 +63,8 @@ class Agent:
                                                  self.toolbox.schemas())
             usage += completion.usage
             yield self._append(AssistantMessage(completion.message, completion.finish_reason, completion.usage))
-            self._check_window(completion)
+            if self.compaction:
+                self._check_window(completion, self.llm.max_tokens)
             text = completion.message.get("content") or ""
             tool_calls = completion.message.get("tool_calls") or []
             if completion.finish_reason == "length":  # a cut-off reply may hold a partial batch: run none of it
@@ -78,12 +81,12 @@ class Agent:
                 yield self._append(ToolResult(call["id"], name, await self.toolbox.call(name, arguments)))
         yield self._append(RunFinished("max_turns", "", self.max_turns, usage))
 
-    def _check_window(self, completion: Completion) -> None:
+    def _check_window(self, completion: Completion, reply_max_tokens: int) -> None:
         """The server's count is exact: make a wrong estimate (or an oversized first request) visible."""
         policy = self.compaction
-        if policy and completion.usage.prompt + self.llm.max_tokens > policy.context_window:
+        if policy and completion.usage.prompt + reply_max_tokens > policy.context_window:
             raise CompactionError(f"The request used {completion.usage.prompt} prompt tokens: with a "
-                                  f"{self.llm.max_tokens}-token reply it exceeds the {policy.context_window}-token "
+                                  f"{reply_max_tokens}-token reply it exceeds the {policy.context_window}-token "
                                   f"window (the first request is too large, or the size estimate was low).")
 
     async def _compact(self, policy: CompactionPolicy) -> AsyncIterator[Compaction | SummaryDiscarded]:
@@ -109,16 +112,18 @@ class Agent:
         completion = await self.llm.complete(summary_request(self.system_prompt, self.events, cut),
                                              self.toolbox.schemas(), max_tokens=policy.summary_max_tokens)
         summary = completion.message.get("content") or ""
+        if completion.finish_reason != "stop" or completion.message.get("tool_calls") or not summary.strip():
+            yield self._append(SummaryDiscarded("no complete summary", completion.usage))  # paid: keep in transcript
+            raise CompactionError(f"The summary request did not return a complete summary "
+                                  f"(finish_reason={completion.finish_reason!r}).")
+        self._check_window(completion, policy.summary_max_tokens)
         compaction = Compaction(summary, cut, bound, 0, completion.usage)
         after = bound_after_compaction([*self.events, compaction], compaction)
-        if completion.finish_reason != "stop" or completion.message.get("tool_calls") or not summary.strip():
-            reason = f"no complete summary (finish_reason={completion.finish_reason!r})"
-        elif after >= bound or not policy.fits(after, reply):
-            reason = f"the summary does not shrink the context enough (~{bound} -> ~{after} tokens)"
-        else:
+        if after < bound and policy.fits(after, reply):
             yield self._append(replace(compaction, tokens_after=after))
             return
-        yield self._append(SummaryDiscarded(reason, completion.usage))  # paid for, so it stays in the transcript
+        reason = f"the summary does not shrink the context enough (~{bound} -> ~{after} tokens)"
+        yield self._append(SummaryDiscarded(reason, completion.usage))
         if not policy.fits(bound, reply):
             raise CompactionError(f"Compaction failed: {reason}, and the context does not fit the "
                                   f"{policy.context_window}-token window.")

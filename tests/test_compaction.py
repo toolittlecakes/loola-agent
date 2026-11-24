@@ -116,7 +116,7 @@ async def test_truncated_summary_fails_loudly_when_the_context_does_not_fit_and_
     llm = SimulatedLLM(window=20_000, turns=40, summary=truncated)
     agent = Agent(llm, Toolbox([Big()]), compaction=CompactionPolicy(20_000, None, 3_000, 1_000))
     seen = []
-    with pytest.raises(CompactionError, match="no complete summary"):
+    with pytest.raises(CompactionError, match="complete summary"):
         async for event in agent.send("long task"):
             seen.append(event)
     assert isinstance(seen[-1], SummaryDiscarded)  # the paid request reaches the transcript before the error
@@ -170,7 +170,7 @@ async def test_tool_call_instead_of_summary_fails_loudly():
     not_summary = Completion({"role": "assistant", "content": None, "tool_calls": [call]}, "tool_calls", Usage(0, 0))
     llm = SimulatedLLM(window=20_000, turns=40, summary=not_summary)
     agent = Agent(llm, Toolbox([Big()]), compaction=CompactionPolicy(20_000, None, 3_000, 1_000))
-    with pytest.raises(CompactionError, match="no complete summary"):
+    with pytest.raises(CompactionError, match="complete summary"):
         await run(agent)
 
 

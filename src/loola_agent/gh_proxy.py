@@ -204,6 +204,14 @@ def truncate(text: str, limit: int) -> str:
             f"`fields`, a smaller `perPage` with `page`, a lighter `detail`, or a more specific path/query ...]")
 
 
+def _graphql_not_found(out: str) -> bool:
+    try:
+        errors = json.loads(out).get("errors")
+    except (json.JSONDecodeError, AttributeError):
+        return False
+    return bool(errors) and all(error.get("type") == "NOT_FOUND" for error in errors)
+
+
 class GhUnavailable(Exception):
     pass
 
@@ -233,6 +241,8 @@ class Gh:
             raise GhUnavailable(f"gh timed out after {self.timeout:g}s") from None
         if code == 0:
             return truncate(out, self.max_output)
+        if _graphql_not_found(out):  # HTTP 200 with a NOT_FOUND error: a wrong owner/repo/number
+            return truncate(f"Error: {err.strip()}", self.max_output)
         status = re.search(r"\(HTTP (\d{3})\)", err)
         if status is None or int(status[1]) in (401, 429) or int(status[1]) >= 500 or "rate limit" in err.lower():
             raise GhUnavailable(f"gh failed (exit {code}): {err.strip()[:500]}")

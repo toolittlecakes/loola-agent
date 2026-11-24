@@ -73,12 +73,14 @@ def context_bound(events: list[Event]) -> int | None:
 
 
 def bound_after_compaction(events: list[Event], compaction: Compaction) -> int:
-    """`events` end with `compaction`. The first request's measured prompt covers the system prompt, tools and
-    template; the summarized prefix had the exact size events[cut].usage.prompt, so the kept tail is the rest."""
+    """`events` end with `compaction`. The first request's measured prompt covers the system prompt, tools, template
+    and the first user message, which the new head message extends with later user messages and the summary;
+    the summarized prefix had the exact size events[cut].usage.prompt, so the kept tail is the rest."""
     first = next(e for e in events if isinstance(e, AssistantMessage))
+    first_user = next(e for e in events if isinstance(e, UserMessage))
     head = build_context("", events)[1]  # the user's messages with the summary
     tail = compaction.tokens_before - events[compaction.cut].usage.prompt
-    return first.usage.prompt + _message_bytes(head) + tail
+    return first.usage.prompt + _bytes(head["content"]) - _bytes(first_user.content) + tail
 
 
 def choose_cut(events: list[Event], bound: int, keep_recent_tokens: int) -> int | None:

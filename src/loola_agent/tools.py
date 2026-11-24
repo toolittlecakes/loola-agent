@@ -4,7 +4,7 @@ Direct tools are declared to the model in every request. Deferred tools are not:
 `tool_search` (BM25 over names and descriptions; matching schemas come back as the tool result) and runs them
 with `tool_call`. The declared tool list therefore never changes during a session, so the prompt prefix
 (and the server's KV cache for it) stays valid however many tools the model discovers."""
-import json, math, re
+import copy, json, math, re
 from collections import Counter
 from collections.abc import Sequence
 from typing import Protocol
@@ -30,15 +30,17 @@ class Toolbox:
         self._tools = {tool.name: tool for tool in [*self._declared, *deferred]}
         if len(self._tools) != len(self._declared) + len(deferred):
             raise ValueError("Duplicate tool names")
-        self._validators = {name: _validator(tool.parameters) for name, tool in self._tools.items()}
+        # One owned snapshot drives declarations, validation and error text: the declared tools start the cached
+        # prompt prefix and must not change during a session, whatever happens to the tool objects.
+        self._parameters = {name: copy.deepcopy(tool.parameters) for name, tool in self._tools.items()}
+        self._validators = {name: _validator(schema) for name, schema in self._parameters.items()}
         self._has_deferred = bool(deferred)
-        # Snapshot: the declared tools are the start of the cached prompt prefix and must not change in a session.
-        self._schemas = json.loads(json.dumps([
-            {"type": "function", "function": {"name": t.name, "description": t.description, "parameters": t.parameters}}
-            for t in self._declared]))
+        self._schemas = [{"type": "function", "function": {"name": t.name, "description": t.description,
+                                                           "parameters": self._parameters[t.name]}}
+                         for t in self._declared]
 
     def schemas(self) -> list[dict]:
-        return self._schemas
+        return copy.deepcopy(self._schemas)
 
     async def call(self, name: str, raw_arguments: str) -> str:
         try:
@@ -56,7 +58,7 @@ class Toolbox:
         if error := best_match(self._validators[name].iter_errors(args)):
             where = "/".join(map(str, error.absolute_path)) or "<root>"
             return (f"Error: invalid arguments for '{name}' at {where}: {error.message}. "
-                    f"Expected schema: {json.dumps(tool.parameters)}")
+                    f"Expected schema: {json.dumps(self._parameters[name])}")
         return await tool.run(args)
 
 
