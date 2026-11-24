@@ -6,7 +6,9 @@ from pathlib import Path
 
 from .agent import Agent, AssistantMessage, Event, RunFinished, ToolResult, ToolStarted
 from .llm import LLMError, OpenAICompatibleLLM
-from .tools import Bash, Toolbox
+from .bash import Bash
+from .catalog import load_catalog
+from .tools import Toolbox
 
 RUNS_DIR = Path.home() / ".loola-agent" / "runs"
 
@@ -27,10 +29,17 @@ def render(event: Event, turn: int) -> None:
                   f"tokens: prompt={u.prompt} cached={cached} completion={u.completion}", file=sys.stderr)
 
 
-async def run(task: str, transcript: Path) -> RunFinished:
+def toolbox(bash: Bash, catalog: Path | None, mode: str) -> Toolbox:
+    if catalog is None:
+        return Toolbox([bash])
+    tools, hint = load_catalog(catalog)
+    return Toolbox([bash, *tools]) if mode == "direct" else Toolbox([bash], deferred=tools, deferred_hint=hint)
+
+
+async def run(task: str, transcript: Path, catalog: Path | None, mode: str) -> RunFinished:
     async with OpenAICompatibleLLM(os.environ["LLM_BASE_URL"], os.environ["LLM_API_KEY"],
                                    os.environ["LLM_MODEL"]) as llm, Bash() as bash:
-        agent = Agent(llm, Toolbox([bash]))
+        agent = Agent(llm, toolbox(bash, catalog, mode))
         turn = 0
         with transcript.open("a") as f:
             async for event in agent.send(task):
@@ -46,13 +55,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Minimal coding agent. Reads LLM_BASE_URL, LLM_API_KEY, LLM_MODEL.")
     parser.add_argument("task", nargs="+")
     parser.add_argument("--transcript", type=Path, help=f"JSONL event log (default: {RUNS_DIR}/<timestamp>.jsonl)")
+    parser.add_argument("--catalog", type=Path, help="extra tools (JSON catalog, dummy implementations)")
+    parser.add_argument("--catalog-mode", choices=["deferred", "direct"], default="deferred",
+                        help="deferred: found via tool_search; direct: all declared in every request")
     args = parser.parse_args()
     logging.basicConfig(level=logging.WARNING, format="⚠️  %(message)s")
     transcript = args.transcript or RUNS_DIR / f"{datetime.now():%Y%m%d-%H%M%S}.jsonl"
     transcript.parent.mkdir(parents=True, exist_ok=True)
     print(f"📝 Transcript: {transcript}", file=sys.stderr)
     try:
-        result = asyncio.run(run(" ".join(args.task), transcript))
+        result = asyncio.run(run(" ".join(args.task), transcript, args.catalog, args.catalog_mode))
     except LLMError as e:
         print(f"❌ {e}", file=sys.stderr)
         return 1
